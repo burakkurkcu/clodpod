@@ -52,7 +52,7 @@ sudo scutil --set HostName "clodpod-xcode-base"
 ###############################################################################
 if ! command -v brew &> /dev/null ; then
     debug "Installing brew..."
-    /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    NONINTERACTIVE=1 /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 
 debug "Updating brew..."
@@ -112,7 +112,7 @@ fi
 sudo dseditgroup -o edit -a admin -t user com.apple.access_ssh
 
 # Force opendirectoryd to flush records to disk.
-# In Tart VMs, opendirectoryd holds records in memory and only writes stubs
+# In these VMs, opendirectoryd holds records in memory and only writes stubs
 # on shutdown. Killing the daemon forces a clean flush before launchd
 # restarts it. This MUST run after every dscl/dseditgroup write above —
 # otherwise the changes (notably com.apple.access_ssh membership, which

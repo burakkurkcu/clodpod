@@ -21,8 +21,7 @@ fi
 ###############################################################################
 # Overrides
 ###############################################################################
-MACOS_VERSION="${MACOS_VERSION:-golden-gate}"
-MACOS_FLAVOR="${MACOS_FLAVOR:-xcode}"
+MACOS_IPSW="${MACOS_IPSW:-latest}"
 
 
 ###############################################################################
@@ -43,7 +42,6 @@ validate_config
 init_config
 install_tools
 init_db
-migrate_vm_names
 
 
 # Pre-parse global options so they take effect even on early-dispatched subcommands.

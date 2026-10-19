@@ -97,7 +97,7 @@ get_running_vms_ram_mb() {
     local total_mb=0
     local vm_name
 
-    if ! running_vms="$(tart list --format json | jq -r '.[] | select(.State == "running") | .Name')"; then
+    if ! running_vms="$(clodvm list --format json | jq -r '.[] | select(.State == "running") | .Name')"; then
         abort "Failed to list running VMs"
     fi
 
@@ -107,7 +107,7 @@ get_running_vms_ram_mb() {
         [[ "$vm_name" != "$exclude_vm" ]] || continue
 
         local vm_ram_mb
-        if ! vm_ram_mb="$(tart get "$vm_name" --format json | jq '.Memory')"; then
+        if ! vm_ram_mb="$(clodvm get "$vm_name" --format json | jq '.Memory')"; then
             abort "Failed to read memory for VM $vm_name"
         fi
 
@@ -188,29 +188,8 @@ install_tools () {
         /usr/bin/env bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     fi
 
-    # Prompt for Tart license acceptance if not already installed
-    if ! command -v tart &>/dev/null && [[ -z "${CLODPOD_ACCEPT_TART_LICENSE:-}" ]]; then
-        info "Clodpod requires Tart (https://tart.run) for virtual machine management."
-        info "Tart is licensed under FSL-1.1-ALv2. It is free for individuals and"
-        info "small organizations, but commercial use may require a paid license."
-        info "See https://tart.run/licensing/ for details."
-        info ""
-        info "To skip this prompt, use --accept-tart-license or set"
-        info "CLODPOD_ACCEPT_TART_LICENSE=1"
-        read -p "Install Tart? (y/N) " -n 1 -r response
-        echo
-        [[ "$response" =~ ^[Yy]$ ]] || abort "Tart is required. Aborting."
-    fi
-
-    # Tap and trust openai/tools so tart and its dependencies (e.g. softnet) install without error
-    if ! brew tap | grep -q '^openai/tools$' 2>/dev/null; then
-        brew tap openai/tools
-    fi
-    brew trust openai/tools 2>/dev/null || true
-
     debug "Installing tools..."
     local TOOLS=()
-    TOOLS+=("openai/tools/tart")        # macOS and Linux VMs on Apple Silicon
     TOOLS+=("jq")                       # JSON processing tool
     TOOLS+=("netcat")                   # test connectivity to guest VM
     TOOLS+=("rush")                     # Restricted User SHell
@@ -226,12 +205,50 @@ install_tools () {
             fi
         fi
     done
+
+    ensure_clodvm
+}
+
+# Build clodvm (VM manager in ./clodvm) when missing or when its sources changed.
+# A clodvm found elsewhere on PATH, e.g. a development build, is used as is.
+ensure_clodvm() {
+    local bin_dir="$DATA_DIR/bin"
+    local source_dir="$WORKSPACE/clodvm"
+    local build_dir="$DATA_DIR/clodvm-build"
+    export PATH="$PATH:$bin_dir"
+
+    local found
+    found="$(command -v clodvm || true)"
+    if [[ -n "$found" ]] && [[ "$found" != "$bin_dir/clodvm" ]]; then
+        return 0
+    fi
+
+    local stamp
+    stamp="$(cd "$source_dir" && find Package.swift clodvm.entitlements Sources -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum | shasum | cut -d' ' -f1)"
+    if [[ -x "$bin_dir/clodvm" ]] && [[ "$(cat "$bin_dir/clodvm.stamp" 2>/dev/null)" == "$stamp" ]]; then
+        return 0
+    fi
+
+    command -v swift &>/dev/null || abort "Building clodvm requires the Xcode Command Line Tools; run: xcode-select --install"
+    info "Building clodvm..."
+    if [[ "$VERBOSE" -lt 2 ]]; then
+        swift build -c release --package-path "$source_dir" --scratch-path "$build_dir" >/dev/null
+    else
+        swift build -c release --package-path "$source_dir" --scratch-path "$build_dir"
+    fi
+
+    # Replace via rename so VMs running from the previous binary keep their mapped executable.
+    mkdir -p "$bin_dir"
+    cp "$build_dir/release/clodvm" "$bin_dir/clodvm.new"
+    codesign --force --sign - --entitlements "$source_dir/clodvm.entitlements" "$bin_dir/clodvm.new"
+    mv "$bin_dir/clodvm.new" "$bin_dir/clodvm"
+    echo "$stamp" > "$bin_dir/clodvm.stamp"
 }
 
 get_vm_state () {
     local vm_name="$1"
     local vm_source="${2:-local}"
-    tart list --source "$vm_source" --format json \
+    clodvm list --source "$vm_source" --format json \
         | jq -r --arg name "$vm_name" '.[] | select(.Name == $name) | .State' 2>/dev/null \
         || echo ""
 }
@@ -241,7 +258,7 @@ get_vm_state_strict () {
     local vm_source="${2:-local}"
     local state
 
-    if ! state="$(tart list --source "$vm_source" --format json \
+    if ! state="$(clodvm list --source "$vm_source" --format json \
         | jq -r --arg vm_name "$vm_name" 'first(.[] | select(.Name == $vm_name) | .State) // ""')"; then
         abort "Failed to query state for VM $vm_name"
     fi
@@ -303,8 +320,9 @@ vm_run () {
         local resolved_ram
         resolved_ram="$(resolve_and_check_memory_budget "$ram_mb" "$exclude_vm")"
         [[ -n "$resolved_ram" ]] || exit 1
-        tart set "$vm_name" --memory "$resolved_ram"
-        tart run "${run_args[@]}" "$vm_name" </dev/null &>/dev/null & disown
+        clodvm set "$vm_name" --memory "$resolved_ram"
+        mkdir -p "$DATA_DIR/logs"
+        clodvm run "${run_args[@]}" "$vm_name" </dev/null &>"$DATA_DIR/logs/$vm_name.log" & disown
         wait_vm_running "$vm_name"
     }
 
@@ -348,7 +366,7 @@ stop_vm () {
     local vm_name="$1"
     if [[ "$(get_vm_state "$vm_name")" != "stopped" ]]; then
         debug "Stopping $vm_name..."
-        tart stop "$vm_name"
+        clodvm stop "$vm_name"
         wait_vm_state "$vm_name" "stopped"
     fi
 }
@@ -357,14 +375,64 @@ clone_vm () {
     local src_vm_name="$1"
     local dst_vm_name="$2"
     trace "Cloning $src_vm_name to $dst_vm_name..."
-    tart clone "$src_vm_name" "$dst_vm_name"
-    tart set "$dst_vm_name" --random-mac --random-serial
-    tart set "$dst_vm_name" --cpu "$(sysctl -n hw.ncpu)"
+    clodvm clone "$src_vm_name" "$dst_vm_name"
+    clodvm set "$dst_vm_name" --random-mac --random-serial
+    clodvm set "$dst_vm_name" --cpu "$(sysctl -n hw.ncpu)"
+}
+
+# Wait until the guest accepts SSH logins as admin; first boots can take minutes.
+wait_vm_ssh () {
+    local vm_name="$1"
+    local ipaddr="$2"
+    local timeout=300
+    local elapsed=0
+
+    while ! ssh -q \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o IdentitiesOnly=yes \
+        -i "$SSH_KEYFILE_PRIV" \
+        "admin@$ipaddr" true; do
+        if [[ "$elapsed" -ge "$timeout" ]]; then
+            abort "SSH to $vm_name ($ipaddr) did not come up within $timeout seconds"
+        fi
+        trace "⏳ Waiting for SSH on $vm_name... ($elapsed/$timeout seconds)"
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+}
+
+# Run a command in a running guest as admin over SSH, with a TTY. Fresh guests
+# have no shell profile yet, so Homebrew is put on PATH explicitly.
+vm_exec () {
+    local vm_name="$1"
+    shift
+    local ipaddr
+    ipaddr="$(clodvm ip --wait 120 "$vm_name")"
+    wait_vm_ssh "$vm_name" "$ipaddr"
+
+    ssh -q \
+        -tt \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o IdentitiesOnly=yes \
+        -i "$SSH_KEYFILE_PRIV" \
+        "admin@$ipaddr" \
+        "$(printf '%q ' /usr/bin/env "PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin" "$@")"
+}
+
+# Write the clodpod public key into a stopped guest's admin account (offline, needs sudo).
+vm_inject_key () {
+    local vm_name="$1"
+    sudo -p "Password required to update the SSH key in $vm_name: " \
+        "$(command -v clodvm)" inject-key "$vm_name" --user admin --authorized-keys "$SSH_KEYFILE_PUB"
 }
 
 stop_all_vms () {
     local running_vms
-    running_vms=$(tart list --format json | jq -r '.[] | select(.State == "running") | .Name')
+    running_vms=$(clodvm list --format json | jq -r '.[] | select(.State == "running") | .Name')
 
     info "Stopping all clodpod virtual machines"
     if [[ -n "$running_vms" ]]; then
@@ -381,10 +449,10 @@ stop_all_vms () {
 
 delete_vm () {
     local vm_name="$1"
-    if tart list --quiet | grep "^$vm_name$" >/dev/null ; then
+    if clodvm list --quiet | grep "^$vm_name$" >/dev/null ; then
         stop_vm "$vm_name"
         debug "Deleting $vm_name..."
-        tart delete "$vm_name" &>/dev/null || true
+        clodvm delete "$vm_name" &>/dev/null || true
     fi
 }
 
@@ -392,7 +460,7 @@ cleanup_tmp_vm () {
     # If build completed install.sh, temp VM is valuable — don't delete it
     if [[ "${BUILD_INSTALL_DONE:-}" == "true" ]] && [[ -n "${TMP_VM_NAME:-}" ]]; then
         warn "Build interrupted after install. Temp VM ${TMP_VM_NAME} preserved."
-        warn "Resume with: tart rename ${TMP_VM_NAME} <base-name>"
+        warn "Resume with: clodvm rename ${TMP_VM_NAME} <base-name>"
     elif [[ -n "${TMP_VM_NAME:-}" ]]; then
         delete_vm "$TMP_VM_NAME"
     fi
@@ -401,9 +469,9 @@ cleanup_tmp_vm () {
     fi
     # Rollback: if old base was renamed aside but new base was never created, restore it
     if [[ -n "${OLD_BASE_VM_NAME:-}" ]]; then
-        if ! tart list --quiet | grep -q "^${BASE_VM_NAME}$" 2>/dev/null; then
+        if ! clodvm list --quiet | grep -q "^${BASE_VM_NAME}$" 2>/dev/null; then
             info "Restoring backup base VM..."
-            tart rename "$OLD_BASE_VM_NAME" "$BASE_VM_NAME" 2>/dev/null || true
+            clodvm rename "$OLD_BASE_VM_NAME" "$BASE_VM_NAME" 2>/dev/null || true
         else
             delete_vm "$OLD_BASE_VM_NAME"
         fi

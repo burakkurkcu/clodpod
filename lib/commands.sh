@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2154 # globals set by config.sh and other modules
-# UI commands: list, help, version, status, OCI provenance
+# UI commands: list, help, version, status, macOS image provenance
 
 list_bases() {
     local result
@@ -8,7 +8,7 @@ list_bases() {
     [[ -n "$result" ]] || return 1
 
     echo "BASES"
-    printf "%-20s %-15s %s\n" "NAME" "OCI SOURCE" "CREATED"
+    printf "%-20s %-15s %s\n" "NAME" "MACOS" "CREATED"
 
     local name _vm_name oci_source created_at
     while IFS='|' read -r name _vm_name oci_source created_at; do
@@ -74,8 +74,8 @@ Commands:
   help, h           Show help for a command
 
 VM layers (each builds on the previous):
-  Layer 0 (OCI)       Downloaded macOS image, cached locally
-  Layer 1 (base)      OCI + brew + AI tools + service logins
+  Layer 0 (OS)        macOS installed from Apple's restore image (IPSW)
+  Layer 1 (base)      Layer 0 + brew + AI tools + service logins
   Layer 2 (instance)  Base clone + project dirs + your tool installs
 
 Existing instances keep working after a base rebuild, but won't have
@@ -84,15 +84,13 @@ the updated packages. Recreate to pick up changes: clod destroy + create.
 Global options:
   --graphics/--no-graphics      VM display mode (default: graphics)
   --forward-port PORT           Reverse-forward host port into VM (repeatable)
-  --rebuild-oci                 Re-download OCI image (Layer 0)
-  --rebuild-base                Rebuild base from OCI (Layer 1, rebuilds xcode VM too)
+  --rebuild-oci                 Reinstall macOS from the IPSW (Layer 0)
+  --rebuild-base                Rebuild base from Layer 0 (Layer 1, rebuilds xcode VM too)
   --allow-sudo/--no-allow-sudo  Passwordless sudo in VM
   -n, --no-select               Skip interactive project selection
   -v/-vv/-vvv                   Verbosity
   -h, --help                    Show help
   --version                     Show version
-
-set CLODPOD_ACCEPT_TART_LICENSE=1 to avoid license notice
 
 Run 'clod help <command>' for command-specific help.
 EOF
@@ -130,15 +128,19 @@ show_help_build_base() {
     cat <<'EOF'
 Usage: clod build-base [options]
 
-Build a base image from OCI source. Installs brew packages, AI tools,
+Build a base image from Layer 0. Installs brew packages, AI tools,
 and opens an interactive SSH session for manual login (Claude, Codex, etc.).
 
-First run downloads the OCI image (~30 GB) — this takes a while.
-Subsequent runs reuse the cached image. Use --rebuild-oci to fetch
-a newer version (e.g. after Xcode or macOS updates from Cirrus Labs).
+First run downloads Apple's macOS restore image (~18 GB) and installs
+macOS from it — this takes a while and asks for sudo once to set up the
+admin user offline. Subsequent runs reuse the installed Layer 0. Use
+--rebuild-oci to reinstall from a newer macOS release.
 
-To update brew packages without re-downloading OCI, just run build-base
-again — it rebuilds from the cached Layer 0.
+The base ships the Xcode Command Line Tools. For full Xcode, add it with
+--install-script (e.g. 'brew install xcodes && xcodes install --latest').
+
+To update brew packages without reinstalling macOS, just run build-base
+again — it rebuilds from the existing Layer 0.
 
 Options:
   --profile NAME          Profile name (default: 'default')
@@ -146,10 +148,12 @@ Options:
 
 Environment:
   ALLOW_SUDO=true         Enable passwordless sudo in the base
+  MACOS_IPSW=latest       Restore image for Layer 0: 'latest' (default),
+                          an IPSW URL, or a local .ipsw path
 
 Layers:
-  Layer 0 (OCI)      Downloaded image, cached. Refresh: --rebuild-oci
-  Layer 1 (base)     OCI + brew + tools + login. This command builds it.
+  Layer 0 (OS)       macOS from IPSW + admin user. Refresh: --rebuild-oci
+  Layer 1 (base)     Layer 0 + brew + tools + login. This command builds it.
   Layer 2 (instance) Base clone + your tools. Created with 'clod create'.
 
 Note: existing instances keep working after base rebuild but won't
@@ -160,7 +164,8 @@ Examples:
   clod build-base
   clod build-base --profile ml --install-script ./setup-cuda.sh
   ALLOW_SUDO=true clod build-base
-  clod --rebuild-oci build-base     # fetch latest OCI image
+  clod --rebuild-oci build-base     # reinstall macOS from the latest IPSW
+  MACOS_IPSW=~/UniversalMac_26.6.2_25G83_Restore.ipsw clod --rebuild-oci build-base
 EOF
 }
 
@@ -182,17 +187,17 @@ variants whose delta is brew packages or new service logins, use
 actually run.
 
 The source base must be stopped. The destination must not already exist
-(neither in the bases registry nor as a tart VM).
+(neither in the bases registry nor as a VM).
 
 After cloning, derive instances:
   clod create <name> --base <dst-profile> --dir ...
 
 To boot the new base directly (to inspect it, edit files, or enter
 recoveryOS):
-  tart run clodpod-base-<dst-profile>              # normal boot
-  tart run --recovery clodpod-base-<dst-profile>   # recoveryOS
+  clodvm run clodpod-base-<dst-profile>              # normal boot
+  clodvm run --recovery clodpod-base-<dst-profile>   # recoveryOS
 
-Note on identity-bound state: tart applies --random-mac --random-serial
+Note on identity-bound state: clodvm applies --random-mac --random-serial
 when you later create instances from a base. State that's bound to the
 VM's serial number — most notably Apple Silicon LocalPolicy / boot
 policy — may not survive that re-serialization. If your modification to
@@ -321,7 +326,7 @@ dispatch_help() {
         add|a)              show_help_command "add PATH [NAME]" "Add a project directory. NAME defaults to directory basename." ;;
         remove|rm)          show_help_command "remove <name|path>" "Remove a project by name or path." ;;
         list|ls|l)          show_help_command "list" "List memory budget, bases, instances, and projects." ;;
-        status|st)          show_help_command "status" "Show sudo setting, layer states, and OCI image provenance." ;;
+        status|st)          show_help_command "status" "Show sudo setting, layer states, and macOS image provenance." ;;
         migrate)            show_help_command "migrate" "Move database from legacy location to ~/.local/share/clodpod/" ;;
         help|h)             show_help ;;
         *)                  show_help ;;
@@ -381,14 +386,49 @@ ensure_oci_base() {
         return 0
     fi
 
-    debug "Creating $OCI_VM_NAME from $MACOS_IMAGE..."
-    debug "Downloading image..."
-    tart pull "$MACOS_IMAGE"
+    local ipsw_path
+    ipsw_path="$(resolve_ipsw)"
 
+    debug "Creating $OCI_VM_NAME from $ipsw_path..."
     TMP_OCI_VM_NAME="clodpod-oci-tmp-$(openssl rand -hex 4)"
-    tart clone "$MACOS_IMAGE" "$TMP_OCI_VM_NAME"
-    tart rename "$TMP_OCI_VM_NAME" "$OCI_VM_NAME"
+    clodvm create "$TMP_OCI_VM_NAME" --from-ipsw "$ipsw_path"
+
+    # Create the admin user and enable SSH and autologin by writing the guest disk offline
+    sudo -p "Password required to set up the admin user in the macOS VM disk: " \
+        "$(command -v clodvm)" provision "$TMP_OCI_VM_NAME" \
+        --user admin \
+        --password admin \
+        --authorized-keys "$SSH_KEYFILE_PUB" \
+        --passwordless-sudo
+
+    clodvm rename "$TMP_OCI_VM_NAME" "$OCI_VM_NAME"
     set_setting "oci_base_image" "$MACOS_IMAGE"
-    tart prune --space-budget=0 2>/dev/null || true
+
+    # Downloaded restore images are no longer needed once macOS is installed
+    rm -rf "$DATA_DIR/ipsw"
     debug "$OCI_VM_NAME created"
+}
+
+# Resolve MACOS_IPSW to a local restore image, downloading it when given as
+# 'latest' or a URL.
+resolve_ipsw() {
+    local source="$MACOS_IPSW"
+    if [[ "$source" == "latest" ]]; then
+        source="$(clodvm ipsw)"
+    fi
+    if [[ "$source" != http://* ]] && [[ "$source" != https://* ]]; then
+        echo "$source"
+        return 0
+    fi
+
+    local ipsw_dir="$DATA_DIR/ipsw"
+    local ipsw_path
+    ipsw_path="$ipsw_dir/$(basename "$source")"
+    if [[ ! -f "$ipsw_path" ]]; then
+        mkdir -p "$ipsw_dir"
+        info "Downloading $(basename "$source")..."
+        curl -fL --progress-bar -C - -o "$ipsw_path.part" "$source"
+        mv "$ipsw_path.part" "$ipsw_path"
+    fi
+    echo "$ipsw_path"
 }

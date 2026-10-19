@@ -56,10 +56,10 @@ build_base_vm() {
 
     # Move existing base aside instead of deleting — allows rollback on failure
     OLD_BASE_VM_NAME=""
-    if tart list --quiet | grep "^${base_vm_name}$" >/dev/null 2>&1; then
+    if clodvm list --quiet | grep "^${base_vm_name}$" >/dev/null 2>&1; then
         OLD_BASE_VM_NAME="${base_vm_name}-old-$(openssl rand -hex 4)"
         trace "Renaming $base_vm_name to $OLD_BASE_VM_NAME (backup)"
-        tart rename "$base_vm_name" "$OLD_BASE_VM_NAME"
+        clodvm rename "$base_vm_name" "$OLD_BASE_VM_NAME"
     fi
 
     TMP_VM_NAME="clodpod-tmp-$(openssl rand -hex 8)"
@@ -76,7 +76,7 @@ build_base_vm() {
     trace "Running install.sh..."
     INSTALL_ENV=( "/usr/bin/env" "VERBOSE=$VERBOSE" "ALLOW_SUDO=${ALLOW_SUDO:-false}" )
 
-    if ! tart exec -it "$TMP_VM_NAME" \
+    if ! vm_exec "$TMP_VM_NAME" \
         "${INSTALL_ENV[@]}" bash \
         "/Volumes/My Shared Files/__install/install.sh"; then
         abort "install.sh failed — base VM will not be saved"
@@ -91,20 +91,17 @@ build_base_vm() {
         trace "Running install-extra.sh for profile $profile_name..."
         # Copy to guest dir so VM can access it
         cp "$profile_dir/install-extra.sh" "$DATA_DIR/guest/install-extra.sh"
-        if ! tart exec -it "$TMP_VM_NAME" \
+        if ! vm_exec "$TMP_VM_NAME" \
             "${INSTALL_ENV[@]}" bash \
             "/Volumes/My Shared Files/__install/install-extra.sh"; then
             abort "install-extra.sh failed — base VM will not be saved"
         fi
     fi
 
-    # Sync SSH key so interactive session can connect (base always uses admin)
-    vm_sync_authorized_key "$TMP_VM_NAME" "admin"
-
     # Interactive session: let user log in to services
     info "Log in to services and exit when done."
     local ipaddr
-    ipaddr="$(tart ip --wait 20 "$TMP_VM_NAME")"
+    ipaddr="$(clodvm ip --wait 20 "$TMP_VM_NAME")"
     ssh -q -tt \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
@@ -117,12 +114,12 @@ build_base_vm() {
     stop_vm "$TMP_VM_NAME"
 
     trace "Renaming $TMP_VM_NAME to $base_vm_name"
-    tart rename "$TMP_VM_NAME" "$base_vm_name"
+    clodvm rename "$TMP_VM_NAME" "$base_vm_name"
     TMP_VM_NAME=""
     BUILD_INSTALL_DONE=""
     set_setting "allow_sudo" "${ALLOW_SUDO:-false}"
     set_setting "oci_base_image" "$MACOS_IMAGE"
-    base_register "$profile_name" "$base_vm_name" "${MACOS_VERSION}-${MACOS_FLAVOR}"
+    base_register "$profile_name" "$base_vm_name" "$(clodvm get "$OCI_VM_NAME" --format json | jq -r '.OS')"
 
     # New base built successfully — remove old base
     if [[ -n "$OLD_BASE_VM_NAME" ]]; then
@@ -132,10 +129,6 @@ build_base_vm() {
     fi
 
     debug "Building $base_vm_name successful"
-
-    # Prune OCI cache — base VM is built, cache is no longer needed
-    debug "Pruning OCI cache..."
-    tart prune --space-budget=0 2>/dev/null || true
 }
 
 # Explicit build-base command
@@ -226,7 +219,7 @@ cmd_clone_base() {
     [[ -n "$src" && -n "$dst" ]] || abort "Usage: clod clone-base <src-profile> <dst-profile>"
 
     # Validate names (same rule as --profile in build-base, prevents path
-    # traversal in the per-profile install-extra.sh dir and keeps tart VM
+    # traversal in the per-profile install-extra.sh dir and keeps VM
     # names sane).
     if [[ ! "$src" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then
         abort "Error: invalid source profile name ($src)"
@@ -244,17 +237,17 @@ cmd_clone_base() {
     oci_source="$(base_get_oci_source "$src")"
     dst_vm="clodpod-base-${dst}"
 
-    # Belt-and-braces: the bases row may be stale relative to tart's view
+    # Belt-and-braces: the bases row may be stale relative to clodvm's view
     # (e.g. user manually deleted the VM). Verify the source VM actually
     # exists and the dst VM name isn't already taken.
-    get_vm_exists "$src_vm" || abort "Error: source VM missing ($src_vm). Stored in bases but not in tart — clean up with 'sqlite3 \"$DB_FILE\" \"DELETE FROM bases WHERE name = ...\"'."
-    ! get_vm_exists "$dst_vm" || abort "Error: a tart VM named $dst_vm already exists"
+    get_vm_exists "$src_vm" || abort "Error: source VM missing ($src_vm). Stored in bases but not in clodvm — clean up with 'sqlite3 \"$DB_FILE\" \"DELETE FROM bases WHERE name = ...\"'."
+    ! get_vm_exists "$dst_vm" || abort "Error: a VM named $dst_vm already exists"
 
-    # tart clone requires the source to be stopped. Don't auto-stop —
+    # clodvm clone requires the source to be stopped. Don't auto-stop —
     # could interrupt a session the user has live in the source base.
     local src_state
     src_state="$(get_vm_state "$src_vm")"
-    [[ "$src_state" == "stopped" ]] || abort "Error: source VM ($src_vm) must be stopped before cloning (current state: $src_state). Stop it via tart stop $src_vm or by exiting any live session."
+    [[ "$src_state" == "stopped" ]] || abort "Error: source VM ($src_vm) must be stopped before cloning (current state: $src_state). Stop it via clodvm stop $src_vm or by exiting any live session."
 
     info "Cloning base $src → $dst (APFS CoW; install.sh not re-run)"
     clone_vm "$src_vm" "$dst_vm"
@@ -266,7 +259,7 @@ cmd_clone_base() {
     info "  clod create <instance> --base $dst --dir ..."
     info ""
     info "To boot the new base directly (e.g. to inspect or modify it):"
-    info "  tart run $dst_vm              # normal boot"
-    info "  tart run --recovery $dst_vm   # recoveryOS (boot policy, csrutil, …)"
+    info "  clodvm run $dst_vm              # normal boot"
+    info "  clodvm run --recovery $dst_vm   # recoveryOS (boot policy, csrutil, …)"
 }
 

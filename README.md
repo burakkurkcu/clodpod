@@ -7,7 +7,7 @@ ClodPod creates a macOS virtual machine sandbox configured to run applications l
 ClodPod maps any number of your project directories into the virtual machine so AI agents can work on your code while remaining isolated from your host computer.
 </br>
 </br>
-ClodPod virtual machines include Xcode and common development tools, and it's easy to extend to add your own development tools and configuration files.
+ClodPod virtual machines include the Xcode Command Line Tools and common development tools, and it's easy to extend to add your own development tools (including full Xcode) and configuration files.
 
 </br>
 </br>
@@ -21,7 +21,7 @@ ClodPod virtual machines include Xcode and common development tools, and it's ea
 - Open multiple AI agents sessions and shell prompts, or use the GUI
 - Bundled `herdr` agent multiplexer for running many agents in a single session
 - Headless mode for CI/CD workflows with `--no-graphics`
-- Includes Xcode and common development tools; you can add your own tools too
+- Includes the Xcode Command Line Tools and common development tools; you can add your own tools too
 - Fast rebuild and relaunch using a three-layer APFS CoW caching system
 - Named VM instances for switching between projects or worktree branches
 - Parallel VM execution with configurable memory budget
@@ -189,13 +189,19 @@ reach host resources such as databases and local LLMs.
 Both methods can be combined.
 
 
-## macOS versions
+## Virtual machines and macOS versions
 
-By default ClodPod uses the `ghcr.io/cirruslabs/macos-golden-gate-xcode:latest` VM flavor, but this is configurable by setting the MACOS_VERSION and MACOS_FLAVOR environment variables when building the VM:
+ClodPod manages its virtual machines with `clodvm`, a small tool in `./clodvm` built on Apple's Virtualization framework. It is compiled from source on first run, which requires the Xcode Command Line Tools on the host (`xcode-select --install`). VMs are stored in `~/.local/share/clodpod/vms`.
 
-    MACOS_VERSION=sequoia MACOS_FLAVOR=vanilla clod shell
+The first build downloads Apple's macOS restore image (IPSW, ~18 GB), installs macOS from it, and then sets up the `admin` user, autologin, and SSH by writing the VM disk offline, which asks for your sudo password once. By default ClodPod uses the latest macOS release supported by the host; to use another release, set MACOS_IPSW to an IPSW URL or a local `.ipsw` file when building the VM:
 
-See the [cirrus packages page on Github](https://github.com/orgs/cirruslabs/packages?tab=packages&q=macos-) to see the available alternatives.
+    MACOS_IPSW=~/Downloads/UniversalMac_26.6.2_25G83_Restore.ipsw clod --rebuild-oci build-base
+
+The guest macOS cannot be newer than the host's.
+
+Full Xcode is not preinstalled. Add it to a base with a profile install script, for example one running `brew install xcodes && xcodes install --latest`:
+
+    clod build-base --install-script ./install-xcode.sh
 
 
 ## Setup notes
@@ -206,8 +212,8 @@ NOTE1: This value was empirically calculated (N=1) to leave plenty of memory for
 
 Optional virtual machine configuration (example):
 
-    tart set clodpod-xcode --cpu 8
-    tart set clodpod-xcode --memory "$(( $(sysctl -n hw.memsize) * 2 / 3 / 1024 / 1024 ))"
+    clodvm set clodpod-xcode --cpu 8
+    clodvm set clodpod-xcode --memory "$(( $(sysctl -n hw.memsize) * 2 / 3 / 1024 / 1024 ))"
 
 
 ## Add your own tools and configuration
@@ -273,7 +279,7 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the list of contributors to this proj
 
 This project builds on the great works of other open-source authors:
 
-- [Tart](https://tart.run): macOS and Linux VMs on Apple Silicon (licensed under [FSL-1.1-ALv2](https://tart.run/licensing/); free for individuals, commercial use may require a paid license)
+- [Lume](https://github.com/trycua/cua/tree/main/libs/lume): macOS VMs on Apple Silicon; clodvm's offline guest setup follows its unattended setup patcher (MIT)
 - [Homebrew](https://brew.sh): 🍺 The missing package manager for macOS (or Linux)
 - [Sqlite](https://sqlite.org): The most used database engine in the world
 - [Shellcheck](https://www.shellcheck.net): finds bugs in your shell scripts

@@ -35,7 +35,7 @@ get_vm_ip_or_abort() {
 
     debug "Checking $vm_name IP connectivity"
     local ipaddr
-    ipaddr="$(tart ip --wait 20 "$vm_name")"
+    ipaddr="$(clodvm ip --wait 20 "$vm_name")"
     if ! nc -z "$ipaddr" 22 ; then
         error "$(get_local_network_error "$vm_name")"
         read -n 1 -s -r -p "Press any key to open System Settings"
@@ -100,35 +100,6 @@ ssh_into_vm() {
             zsh --login
 }
 
-vm_sync_authorized_key() {
-    local vm_name="$1"
-    local ssh_user="${2:-admin}"
-    local pub_key_b64
-
-    pub_key_b64="$(base64 < "$SSH_KEYFILE_PUB" | tr -d '\n')"
-    # shellcheck disable=SC2016 #  Expressions don't expand in single quotes, use double quotes for that.
-    if [[ "$ssh_user" == "admin" ]]; then
-        # No sudo needed — tart exec runs as admin, admin owns .ssh
-        tart exec "$vm_name" \
-            "/usr/bin/env" "PUB_KEY_B64=$pub_key_b64" \
-            bash -lc '
-                install -d -m 700 /Users/admin/.ssh
-                printf "%s" "$PUB_KEY_B64" | /usr/bin/base64 -D > /Users/admin/.ssh/authorized_keys
-                chmod 600 /Users/admin/.ssh/authorized_keys
-            '
-    else
-        # Legacy: clodpod user needs sudo
-        tart exec "$vm_name" \
-            "/usr/bin/env" "PUB_KEY_B64=$pub_key_b64" \
-            bash -lc '
-                sudo install -d -m 700 -o clodpod -g clodpod /Users/clodpod/.ssh
-                printf "%s" "$PUB_KEY_B64" | /usr/bin/base64 -D | sudo tee /Users/clodpod/.ssh/authorized_keys >/dev/null
-                sudo chown clodpod:clodpod /Users/clodpod/.ssh/authorized_keys
-                sudo chmod 600 /Users/clodpod/.ssh/authorized_keys
-            '
-    fi
-}
-
 vm_list() {
     local result
     result=$(sqlite3 -separator '|' "$DB_FILE" <<EOF || return 1
@@ -156,11 +127,11 @@ EOF
         state="$(get_vm_state "$vm_name")"
         [[ -n "$state" ]] || state="not created"
 
-        # RAM display: running → actual from tart get; stopped → stored or (budget)
+        # RAM display: running → actual from clodvm get; stopped → stored or (budget)
         if [[ "$state" == "running" ]]; then
-            ipaddr="$(tart ip "$vm_name" 2>/dev/null || echo "-")"
+            ipaddr="$(clodvm ip "$vm_name" 2>/dev/null || echo "-")"
             [[ -n "$ipaddr" ]] || ipaddr="-"
-            ram_display="$(tart get "$vm_name" --format json | jq '.Memory' 2>/dev/null || echo "?")"
+            ram_display="$(clodvm get "$vm_name" --format json | jq '.Memory' 2>/dev/null || echo "?")"
         elif [[ -n "$stored_ram" ]] && [[ "$stored_ram" != "0" ]]; then
             ram_display="$stored_ram"
         else
@@ -238,7 +209,7 @@ vm_shell() {
         # VM already running — warn if --ram override given, then reconnect
         if [[ -n "${SHELL_RAM_OVERRIDE:-}" ]]; then
             local current_ram
-            current_ram="$(tart get "$vm_name" --format json | jq '.Memory' 2>/dev/null || echo "?")"
+            current_ram="$(clodvm get "$vm_name" --format json | jq '.Memory' 2>/dev/null || echo "?")"
             warn "$instance_name is already running with ${current_ram} MB RAM. --ram override ignored for running VM."
         fi
         # xcode reads dirs from the projects table; mount changes (new project,
@@ -269,10 +240,6 @@ vm_shell() {
     if [[ "$ssh_user" == "clodpod" ]]; then
         info "Instance $instance_name uses legacy clodpod user."
         info "Recreate to use admin: clod destroy $instance_name && clod create $instance_name --dir ..."
-    fi
-
-    if [[ "${SSH_KEY_CREATED:-false}" == "true" ]]; then
-        vm_sync_authorized_key "$vm_name" "$ssh_user"
     fi
 
     local initial_dir=""
@@ -397,7 +364,7 @@ vm_destroy_instance() {
 
     if get_vm_exists "$vm_name"; then
         stop_vm "$vm_name"
-        tart delete "$vm_name" 2>/dev/null || true
+        clodvm delete "$vm_name" 2>/dev/null || true
         if get_vm_exists "$vm_name"; then
             abort "Failed to delete VM $vm_name — DB records kept so destroy can be retried"
         fi
@@ -675,7 +642,7 @@ _vm_build_xcode_from_base() {
     local final_vm_name="clodpod-xcode"
 
     if get_vm_exists "$final_vm_name"; then
-        abort "Error: tart VM already exists outside the database ($final_vm_name)"
+        abort "Error: VM already exists outside the database ($final_vm_name)"
     fi
 
     local base_vm
@@ -702,7 +669,7 @@ _vm_build_xcode_from_base() {
     vm_run "$TMP_VM_NAME" 0 "" "${run_args[@]}"
 
     trace "Running configure.sh..."
-    if ! tart exec -it "$TMP_VM_NAME" \
+    if ! vm_exec "$TMP_VM_NAME" \
         "/usr/bin/env" "VERBOSE=$VERBOSE" "ALLOW_SUDO=${ALLOW_SUDO:-false}" bash \
         "/Volumes/My Shared Files/__install/configure.sh"; then
         abort "configure.sh failed — xcode VM will not be saved"
@@ -712,7 +679,7 @@ _vm_build_xcode_from_base() {
     stop_vm "$TMP_VM_NAME"
 
     trace "Renaming $TMP_VM_NAME to $final_vm_name"
-    tart rename "$TMP_VM_NAME" "$final_vm_name"
+    clodvm rename "$TMP_VM_NAME" "$final_vm_name"
     TMP_VM_NAME=""
 
     if ! sqlite3 "$DB_FILE" <<EOF
@@ -721,7 +688,7 @@ VALUES ('xcode', '$final_vm_name', NULL, 'default', 'admin', datetime('now'));
 EOF
     then
         warn "DB insert failed — removing VM $final_vm_name"
-        tart delete "$final_vm_name" 2>/dev/null || true
+        clodvm delete "$final_vm_name" 2>/dev/null || true
         abort "Failed to record xcode instance"
     fi
 
@@ -769,7 +736,7 @@ vm_create() {
     local final_vm_name
     final_vm_name="$(vm_name_to_vm_name "$instance_name")"
     if get_vm_exists "$final_vm_name"; then
-        abort "Error: tart VM already exists outside the database ($final_vm_name)"
+        abort "Error: VM already exists outside the database ($final_vm_name)"
     fi
 
     local create_ram_mb=""
@@ -852,7 +819,7 @@ vm_create() {
     vm_run "$TMP_VM_NAME" 0 "" "${vm_args[@]}"
 
     trace "Running configure.sh..."
-    if ! tart exec -it "$TMP_VM_NAME" \
+    if ! vm_exec "$TMP_VM_NAME" \
         "/usr/bin/env" "VERBOSE=$VERBOSE" "ALLOW_SUDO=${ALLOW_SUDO:-false}" bash \
         "/Volumes/My Shared Files/__install/configure.sh"; then
         abort "configure.sh failed — named VM will not be saved"
@@ -862,7 +829,7 @@ vm_create() {
     stop_vm "$TMP_VM_NAME"
 
     trace "Renaming $TMP_VM_NAME to $final_vm_name"
-    tart rename "$TMP_VM_NAME" "$final_vm_name"
+    clodvm rename "$TMP_VM_NAME" "$final_vm_name"
     TMP_VM_NAME=""
 
     local sql
@@ -890,7 +857,7 @@ COMMIT;"
 
     if ! printf '%s\n' "$sql" | sqlite3 "$DB_FILE"; then
         warn "DB insert failed — removing VM $final_vm_name"
-        tart delete "$final_vm_name" 2>/dev/null || true
+        clodvm delete "$final_vm_name" 2>/dev/null || true
         if get_vm_exists "$final_vm_name"; then
             abort "Failed to record instance AND failed to delete VM $final_vm_name — orphan VM left behind"
         fi

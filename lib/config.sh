@@ -1,23 +1,6 @@
 # shellcheck shell=bash
 # Configuration: validation, version, names, paths
 
-VALID_MACOS_VERSIONS="golden-gate tahoe sequoia sonoma ventura monterey"
-VALID_MACOS_FLAVORS="vanilla base xcode"
-
-is_valid_version() {
-    case " $VALID_MACOS_VERSIONS " in
-        *" $1 "*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-is_valid_flavor() {
-    case " $VALID_MACOS_FLAVORS " in
-        *" $1 "*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # Resolve database location: new XDG path, legacy install path, or fresh install
 resolve_db_file() {
     if [[ -f "$DATA_DIR/clodpod.sqlite" ]]; then
@@ -40,21 +23,20 @@ validate_platform() {
 }
 
 validate_config() {
-    MACOS_VERSION=$(echo "$MACOS_VERSION" | tr '[:upper:]' '[:lower:]')
-    MACOS_FLAVOR=$(echo "$MACOS_FLAVOR" | tr '[:upper:]' '[:lower:]')
-
-    if ! is_valid_version "$MACOS_VERSION"; then
-        abort "Unknown MACOS_VERSION $MACOS_VERSION; try $VALID_MACOS_VERSIONS"
-    fi
-    if ! is_valid_flavor "$MACOS_FLAVOR"; then
-        abort "Unknown MACOS_FLAVOR $MACOS_FLAVOR; try $VALID_MACOS_FLAVORS"
-    fi
+    case "$MACOS_IPSW" in
+        latest|http://*|https://*)
+            ;;
+        *)
+            MACOS_IPSW="$(resolve_physical_path "$MACOS_IPSW" 2>/dev/null || true)"
+            [[ -f "$MACOS_IPSW" ]] || abort "MACOS_IPSW must be 'latest', an IPSW URL, or a path to an IPSW file"
+            ;;
+    esac
 }
 
 # shellcheck disable=SC2034,SC2154 # variables used/set by clod and other modules
 init_config() {
     VERSION="1.0.30"
-    OCI_VM_NAME="clodpod-oci-${MACOS_VERSION}-${MACOS_FLAVOR}"
+    OCI_VM_NAME="clodpod-oci-macos"
     BASE_VM_NAME="clodpod-base-default"
     DATA_DIR="$HOME/.local/share/clodpod"
     OLD_DB_FILE="$WORKSPACE/.clodpod.sqlite"
@@ -63,53 +45,6 @@ init_config() {
     SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_clodpod"
     SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
     SSH_KEY_CREATED=false
-    MACOS_IMAGE="ghcr.io/cirruslabs/macos-$MACOS_VERSION-$MACOS_FLAVOR:latest"
+    MACOS_IMAGE="$MACOS_IPSW"
     debug "MacOS image: $MACOS_IMAGE"
-}
-
-# Rename legacy VM names to new scheme (one-time, idempotent)
-migrate_vm_names() {
-    local old new
-    # OCI cache: clodpod-oci-base → clodpod-oci-<version>-<flavor>
-    old="clodpod-oci-base"
-    new="$OCI_VM_NAME"
-    if [[ "$old" != "$new" ]] && tart list --quiet 2>/dev/null | grep -q "^${old}$"; then
-        if ! tart list --quiet 2>/dev/null | grep -q "^${new}$"; then
-            info "Renaming VM $old → $new"
-            tart rename "$old" "$new"
-        fi
-    fi
-
-    # Base: clodpod-xcode-base → clodpod-base-default
-    old="clodpod-xcode-base"
-    new="$BASE_VM_NAME"
-    if [[ "$old" != "$new" ]] && tart list --quiet 2>/dev/null | grep -q "^${old}$"; then
-        if ! tart list --quiet 2>/dev/null | grep -q "^${new}$"; then
-            info "Renaming VM $old → $new"
-            tart rename "$old" "$new"
-        fi
-    fi
-
-    # Register existing base in DB if not tracked yet
-    if tart list --quiet 2>/dev/null | grep -q "^${BASE_VM_NAME}$"; then
-        if ! base_exists "default"; then
-            local oci_source="${MACOS_VERSION}-${MACOS_FLAVOR}"
-            base_register "default" "$BASE_VM_NAME" "$oci_source"
-            debug "Registered existing base in database"
-        fi
-    fi
-
-    # Unify legacy DST VM as the 'xcode' named instance. Preserves the
-    # historical ssh_user (clodpod for pre-admin VMs, admin for newer ones).
-    if tart list --quiet 2>/dev/null | grep -q "^clodpod-xcode$"; then
-        if ! vm_instance_exists "xcode"; then
-            local dst_ssh_user
-            dst_ssh_user="$(get_setting "dst_ssh_user" "clodpod")"
-            sqlite3 "$DB_FILE" <<EOF
-INSERT INTO instances (name, vm_name, ram_mb, base_name, ssh_user, created_at)
-VALUES ('xcode', 'clodpod-xcode', NULL, 'default', '$(sql_escape "$dst_ssh_user")', datetime('now'));
-EOF
-            info "Migrated legacy VM to instance 'xcode'"
-        fi
-    fi
 }

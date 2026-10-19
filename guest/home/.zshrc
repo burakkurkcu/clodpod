@@ -77,7 +77,7 @@ export PATH
 # so we can use the simpler/easier/better homebrew ln tool
 LN="$(brew --prefix)/opt/coreutils/libexec/gnubin/ln"
 # Guard the shared-folder mount: when an instance is started with no --dir
-# args (or before tart has surfaced the mount), the path is absent — `fd`
+# args (or before the VM has surfaced the mount), the path is absent — `fd`
 # would error. -r on xargs handles the symmetric case where the mount is
 # present but empty, avoiding `ln: missing file operand`.
 if [[ -x "$LN" ]] && [[ -d "/Volumes/My Shared Files" ]]; then

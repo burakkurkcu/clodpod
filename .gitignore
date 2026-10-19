@@ -13,3 +13,4 @@ xcschememanagement.plist
 **/xcuserdata/
 # User directory for storing files that are not committed
 guest/home/user/
+/clodvm/.build/

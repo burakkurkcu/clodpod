@@ -31,7 +31,7 @@ Describe 'top-level help'
 
     It 'shows VM layers'
         When call show_help
-        The output should include "Layer 0 (OCI)"
+        The output should include "Layer 0 (OS)"
         The output should include "Layer 1 (base)"
         The output should include "Layer 2 (instance)"
     End
